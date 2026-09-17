@@ -1,5 +1,9 @@
 # DSH Evolution OS
 
+![Tests](https://img.shields.io/badge/tests-57%20passed-brightgreen)
+![Python](https://img.shields.io/badge/python-3.13-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 > A governance layer for personal AI memory: multiple AI agents share one
 > memory store — and every write is tiered, audited, and reversible.
 
