@@ -7,9 +7,9 @@
 
 $ErrorActionPreference = 'Continue'
 
-$Py     = 'python'
-$Script = Join-Path $PSScriptRoot 'weekly_audit.py'
-$Dir    = Join-Path $PSScriptRoot '..\knowledge\Inbox\_reports'
+$Py     = 'E:\software\python\python.exe'
+$Script = 'E:\software\DSH_Evolution_OS\tools\weekly_audit.py'
+$Dir    = 'E:\software\DSH_Evolution_OS\knowledge\Inbox\_reports'
 $State  = Join-Path $Dir '.audit-state.json'
 
 if (-not (Test-Path $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }

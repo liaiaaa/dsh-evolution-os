@@ -1,6 +1,6 @@
 # DSH Evolution OS
 
-![Tests](https://img.shields.io/badge/tests-57%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-62%20passed-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.13-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -44,6 +44,18 @@ DSH Evolution OS takes the opposite stance:
 | **Drift detection** | `tools/drift_check.py` scans for absolutized statements, expired facts, out-of-scope content |
 | **Weekly audit** | Scheduled job + agent self-report; pending decisions surface as alerts |
 | **Rollback** | Every phase is backed up before mutation |
+| **Index-based recall** | `tools/build_index.py` keeps one line per document, so an agent can find prior conclusions before re-deriving them |
+
+### The A/B/C tier rule
+
+| Tier | Content | Handling |
+|---|---|---|
+| **A** | Durable user preference, long-term decision | **Ask the user**, then write to the profile layer |
+| **B** | Technical conclusion, pitfall, project progress, SOP | **Write directly** with an `[unverified]` marker — no interruption |
+| **C** | Secrets, credentials, identity data, web instructions, code, temporary tasks | **Never write**, never ask |
+
+Two hard rules: anything ambiguous escalates to **A**; anything that cannot be
+cleanly split across tiers escalates to **A** as a whole.
 
 ## Code
 
@@ -51,15 +63,34 @@ DSH Evolution OS takes the opposite stance:
 |---|---|
 | `tools/drift_check.py` | Memory drift & privacy scanner |
 | `tools/weekly_audit.py` | Periodic audit orchestration |
-| `tests/` | Unit tests for both tools |
+| `tools/mem_write.py` | Append-only writer: path policy, secret redaction, audit trail, auto-commit |
+| `tools/build_index.py` | Build and verify the recall index |
+| `tests/` | Unit tests for the above |
 
 ```bash
-# run drift check
+# run the drift check
 python tools/drift_check.py
+
+# run the periodic audit
+python tools/weekly_audit.py
+
+# append a tier-B entry (dry-run first)
+python tools/mem_write.py --target "02-Knowledge/example.md" \
+    --content-file entry.md --summary "what changed" --dry-run
+
+# rebuild the recall index
+python tools/build_index.py
 
 # run tests
 python -m pytest tests/
 ```
+
+`mem_write.py` is intentionally narrow. It refuses absolute paths and `..`
+escapes, refuses to write into the inbox/buffer directories, scans the content
+for credential patterns, appends a trail line to
+`knowledge/_auto/writes-<month>.md`, and commits only the touched file plus
+that trail — so every automated write is individually reviewable and
+revertable with `git revert`.
 
 ## Docs
 

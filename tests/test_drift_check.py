@@ -178,13 +178,13 @@ class ObligationTests(unittest.TestCase):
             "MiMO 项目 AGENTS.md": root / "mimo-project.md",
         }
         bodies = {
-            "项目 AGENTS.md": "个人偏好.md 是终极权威；mem0 只保存 A 级；B 级追加到 Inbox；C 级禁止写入；Agent 不得自行 `delete_memory`；任务收尾必须询问沉淀；会话开始报告 .pending-alert.md",
-            "个人AI协议.md": "权威源高于 mem0；mem0 只保存稳定个人事实；B 级只能进 Inbox；C 级禁止写入；Agent 不得自行删除或覆盖；任务收尾的沉淀询问；豆包不接入共享 mem0",
-            "个人偏好.md": "本文件是个人偏好的权威版本；任务收尾的沉淀询问",
+            "项目 AGENTS.md": "个人偏好.md 是终极权威；A 级必须问用户；B 级直接写入正式目录；C 级禁止写入；Agent 不得自行删除或覆盖；分级自动沉淀；拿不准升 A；会话开始报告 .pending-alert.md",
+            "个人AI协议.md": "权威源高于 mem0；A 级必须问用户；B 级直接写正式目录；C 级禁止写入；不得自行删除或覆盖；分级沉淀；拿不准升 A；破坏性操作红线；豆包不接入共享 mem0",
+            "个人偏好.md": "本文件是个人偏好的权威版本；分级沉淀；破坏性操作红线已迁出到个人AI协议.md",
             "DSH mem0-memory Skill": "A 级可写入 mem0；B 级只能在 Inbox；C 级禁止写入；不得自行 `delete_memory`；写入后必须回读确认；任务收尾的沉淀询问",
             "WorkBuddy MEMORY.md": "以 00-Profile 为权威，mem0 为索引；不自行删除或覆盖；任务收尾必须询问沉淀；会话开始报告 .pending-alert.md",
             "MiMO 全局 AGENTS.md": "mem0 仅存 A 级；B 级进 Inbox；C 级禁止写入；不得自行删除或覆盖；写入后回读；任务收尾的沉淀询问；报告 .pending-alert.md",
-            "MiMO 项目 AGENTS.md": "mem0 只保存 A 级；C 级禁止写入；不得自行 `delete_memory`；任务收尾必须询问沉淀",
+            "MiMO 项目 AGENTS.md": "A 级必须问用户；C 级禁止写入；不得自行删除或覆盖；分级自动沉淀",
         }
         for label, path in paths.items():
             path.write_text(bodies[label], encoding="utf-8")
@@ -193,10 +193,15 @@ class ObligationTests(unittest.TestCase):
     def test_missing_required_file_fails_rule_check(self):
         with TempDir() as root:
             paths = self._full_contract_files(root)
+            # 2026-10-24：WorkBuddy/MiMO/Skill 属「未接入 Agent」，缺失报 not_applicable；
+            # 真正的 missing 用非 optional 的项目 AGENTS.md 验证。
             paths["WorkBuddy MEMORY.md"].unlink()
+            paths["项目 AGENTS.md"].unlink()
             result = dc.check_obligations(paths)
-            self.assertEqual("missing", result["WorkBuddy MEMORY.md"]["status"])
-            self.assertFalse(result["WorkBuddy MEMORY.md"]["required_ok"])
+            self.assertEqual("not_applicable", result["WorkBuddy MEMORY.md"]["status"])
+            self.assertTrue(result["WorkBuddy MEMORY.md"]["required_ok"])
+            self.assertEqual("missing", result["项目 AGENTS.md"]["status"])
+            self.assertFalse(result["项目 AGENTS.md"]["required_ok"])
 
     def test_files_existing_with_full_contracts_report_ok(self):
         with TempDir() as root:
@@ -226,7 +231,17 @@ class ObligationTests(unittest.TestCase):
             self.assertNotEqual("ok", result["MiMO 项目 AGENTS.md"]["status"])
 
     def test_doubao_is_manual_not_ok(self):
-        result = dc.check_obligations({})
+        # 隔离：豆包判定与桥账本均不得读取生产文件（审计 #10：测试结果不能依赖用户目录现状）
+        with TempDir() as root:
+            with mock.patch.object(dc, "DEFAULT_MANUAL_VERIFICATION_RECORD", str(root / "absent.json")), \
+                    mock.patch.object(dc, "bridge_health", return_value={
+                        "bridge_code": "ok", "tombstones": 0, "live_points": 0,
+                        "ghosts": [], "last_heal": None, "conflicts": 0,
+                        "failed_deletes": 0, "orphan_pending": 0}), \
+                    mock.patch.object(dc, "KEEP_REGISTRY_FILE", str(root / "registry.md")):
+                (root / "registry.md").write_text(
+                    "| id | fp |\n|---|---|\n", encoding="utf-8")  # 无 uuid 行→解析为空=None？改为含合法行
+                result = dc.check_obligations({})
         self.assertEqual("manual", result["豆包云端指引"]["status"])
         self.assertFalse(result["豆包云端指引"]["required_ok"])
         self.assertTrue(result["豆包云端指引"]["verification_due"])
@@ -398,14 +413,22 @@ class MetricLanguageTests(unittest.TestCase):
             inbox.mkdir()
             profile.write_text("# 个人偏好\n`22222222-2222-4222-8222-222222222222`\n", encoding="utf-8")
             self._make_history_db(db)
-            with mock.patch.object(dc, "DB", str(db)), mock.patch.object(dc, "PROFILE", str(profile)), mock.patch.object(dc, "INBOX", str(inbox)), mock.patch.object(dc, "REPORT_DIR", str(report_dir)), mock.patch.object(dc, "check_obligations", return_value={}), mock.patch.object(sys, "argv", ["drift_check.py"]):
+            with mock.patch.object(dc, "DB", str(db)), mock.patch.object(dc, "PROFILE", str(profile)), \
+                    mock.patch.object(dc, "INBOX", str(inbox)), \
+                    mock.patch.object(dc, "REPORT_DIR", str(report_dir)), \
+                    mock.patch.object(dc, "QDRANT_DB", str(root / "absent-qdrant.sqlite")), \
+                    mock.patch.object(dc, "LEDGER_DB", str(root / "absent-ledger.db")), \
+                    mock.patch.object(dc, "check_obligations", return_value={}), \
+                    mock.patch.object(sys, "argv", ["drift_check.py"]):
                 output = StringIO()
                 with redirect_stdout(output):
                     dc.main()
             report = next(report_dir.glob("漂移检测-*.md")).read_text(encoding="utf-8")
             combined = output.getvalue() + report
-            self.assertIn("history 重建活跃数", combined)
-            self.assertIn("实时集合数量未测量/未知", combined)
+            # 2026-10-01（审计 #12）：向量不可读时 history 兜底重建，口径必须如实标注兜底。
+            self.assertIn("权威活跃集合", combined)
+            self.assertIn("兜底", combined)
+            self.assertNotIn("history 重建活跃数", combined)
             self.assertIn("权威源显式引用 ID 缺失", combined)
             self.assertIn("未执行全文语义同步校验", combined)
             self.assertNotIn("mem0 当前条数", combined)

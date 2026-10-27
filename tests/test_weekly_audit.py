@@ -52,7 +52,13 @@ def run_audit(case, *, bucket_data, keep=None, profile_ids=None, obligations=Non
             mock.patch.object(wa, "REPORT_DIR", str(report_dir)),
             mock.patch.object(wa, "STATE", str(state)),
             mock.patch.object(wa, "ALERT", str(alert)),
+            mock.patch.object(wa.dc, "bridge_health", return_value={
+                "bridge_code": "ok", "tombstones": 0, "live_points": 1, "ghosts": [],
+                "last_heal": None, "conflicts": 0, "failed_deletes": 0, "orphan_pending": 0}),
+            mock.patch.object(wa.dc, "registry_missing", return_value=False),
             mock.patch.object(wa.dc, "read_mem0", return_value=[memory()]),
+            # 2026-10-24 新增 mem0_available() 分支；默认模拟「mem0 已接入」以保持原断言有效
+            mock.patch.object(wa.dc, "mem0_available", return_value=True),
             mock.patch.object(wa.dc, "classify", return_value=(bucket_data, keep or [])),
             mock.patch.object(wa.dc, "read_profile", return_value=("", set(profile_ids or []))),
             mock.patch.object(wa.dc, "check_obligations", return_value=obligations or {"project": {"status": "ok", "required_ok": True}}),
@@ -105,12 +111,16 @@ class WeeklyAuditTests(unittest.TestCase):
         self.assertIn("Inbox 待审核候选", alert)
 
     def test_state_uses_history_and_live_count_names(self):
+        """2026-10-01（审计 #12）：口径已改为权威集合——实时点数必须实测、幽灵入状态。"""
         state, alert = self.run_audit(bucket_data=buckets(), keep=[memory()])
-        self.assertIn("history_reconstructed_active_count", state)
+        self.assertIn("authoritative_active_count", state)
+        self.assertNotIn("history_reconstructed_active_count", state)  # 旧口径键已废止
         self.assertIn("live_collection_count", state)
-        self.assertIsNone(state["live_collection_count"])
+        self.assertEqual(1, state["live_collection_count"])
+        self.assertIn("ghost_vectors", state)
         self.assertNotIn("mem0_count", state)
-        self.assertIn("实时集合数量：**未测量/未知**", alert)
+        self.assertIn("权威活跃集合", alert)
+        self.assertIn("实时向量点数：1", alert)
 
     def test_explicit_reference_gap_is_not_called_semantic_sync(self):
         missing_id = "22222222-2222-4222-8222-222222222222"
@@ -224,14 +234,22 @@ class RealChainTests(unittest.TestCase):
             (inbox / "待审核.md").write_text("\n".join(inbox_lines), encoding="utf-8")
             self.build_history(db, facts)
             (root / "AGENTS.md").write_text(
-                "个人偏好.md 是终极权威；mem0 只保存 A 级；B 级追加到 Inbox；C 级禁止写入；"
-                "Agent 不得自行 `delete_memory`；任务收尾必须询问沉淀；会话开始报告 .pending-alert.md",
+                "个人偏好.md 是终极权威；A 级必须问用户；B 级直接写入正式目录；C 级禁止写入；"
+                "不得自行删除或覆盖；分级自动沉淀；拿不准升 A；会话开始报告 .pending-alert.md",
                 encoding="utf-8",
             )
             # 使用真实规则检查与真实豆包验证记录判定，不 mock 掉判定逻辑。
+            # 2026-10-01（审计 #10）：同时隔离 QDRANT_DB/LEDGER_DB——read_mem0 优先直读
+            # 生产向量库曾把合成数据整体丢弃，导致越界检测从未被测到。
+            # 桥账本/注册表两项义务依赖生产库（表是否齐全随环境变），此处注入固定 ok：
+            # 其真实行为已由 test_ledger_hardening.py 针对性覆盖。
             obligations = wa.dc.check_obligations({"项目 AGENTS.md": root / "AGENTS.md"})
             obligations["豆包云端指引"] = wa.dc._check_doubao_record(str(root / "missing-verification.json"))
+            obligations["mem0 桥方案A账本"] = {"status": "ok", "required_ok": True, "detail": "测试注入", "path": "ledger.db"}
+            obligations["已裁决保留注册表"] = {"status": "ok", "required_ok": True, "detail": "测试注入", "path": "registry.md"}
             with mock.patch.object(wa.dc, "DB", str(db)), \
+                    mock.patch.object(wa.dc, "QDRANT_DB", str(root / "absent-qdrant.sqlite")), \
+                    mock.patch.object(wa.dc, "LEDGER_DB", str(root / "absent-ledger.db")), \
                     mock.patch.object(wa.dc, "PROFILE", str(profile)), \
                     mock.patch.object(wa.dc, "INBOX", str(inbox)), \
                     mock.patch.object(wa.dc, "REPORT_DIR", str(report_dir)), \

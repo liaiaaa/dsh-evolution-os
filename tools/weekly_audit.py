@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""每周体检运行器：只读检查源数据，只写报告、状态与计划任务日志。"""
+"""每周体检运行器：只读检查源数据（mem0/Qdrant/账本/规则文件）；
+默认把报告写到 `Inbox\\_reports\\`（.pending-alert.md/.audit-state.json）——
+**不改任何记忆数据或 Inbox 行**。`--dry-run` 时连报告也不写，纯打印。"""
 import json
 import os
 import sys
@@ -69,6 +71,8 @@ def _rule_groups(obligations):
         if status == "manual":
             if result.get("verification_due", False):
                 manual_due.append((label, result))
+        elif status == "not_applicable":
+            continue  # 该 Agent/组件未接入本机，不是治理故障
         elif status != "ok":
             failures.append((label, result))
     return failures, manual_due
@@ -85,11 +89,14 @@ def main():
         except (OSError, ValueError):
             pass
     reconstructed = dc.read_mem0()
+    health = dc.bridge_health()  # 单一入口：墓碑/实时点/幽灵/自愈留痕/冲突/失败删除（全只读）
+    mem0_on = dc.mem0_available()  # False = 纯文件大脑模式，mem0 相关检查不适用
     buckets, keep = dc.classify(reconstructed)
     _, profile_ids = dc.read_profile()
     reconstructed_ids = {item["id"] for item in reconstructed}
     unreferenced = sorted(reconstructed_ids - profile_ids)
-    explicit_missing = sorted(profile_ids - reconstructed_ids)
+    # mem0 未接入时，权威源里对 mem0 UUID 的引用无从校验，不算缺失
+    explicit_missing = sorted(profile_ids - reconstructed_ids) if mem0_on else []
     obligations = dc.check_obligations()
     backlog = dc.inbox_backlog()
     candidates = inbox_candidates()
@@ -116,7 +123,25 @@ def main():
 
     reasons = []
     if out_of_scope:
-        reasons.append("history 重建集合中有 %d 条越界候选" % len(out_of_scope))
+        reasons.append("权威活跃集合中有 %d 条越界候选" % len(out_of_scope))
+    if health["ghosts"]:
+        reasons.append("幽灵向量 %d 条：重启 mem0 桥后自动清除，未清除前请勿信任向量盘直读" % len(health["ghosts"]))
+    if health["bridge_code"] == "old" and mem0_on:
+        reasons.append("mcp_server.py 为旧版（无权威账本）——重启使用 mem0 的会话后生效")
+    _unmeasurable = [k for k in ("conflicts", "failed_deletes", "orphan_pending") if health[k] is None]
+    if not mem0_on:
+        pass  # 纯文件大脑模式：桥运行态不适用，不报「不可测」
+    elif _unmeasurable:
+        reasons.append("桥运行态不可测（表未建/不可读：%s）——不得视为零" % "、".join(_unmeasurable))
+    else:
+        if health["conflicts"]:
+            reasons.append("复活企图 %d 起（墓碑 id 被 ADD/UPDATE，将由自愈重删）" % health["conflicts"])
+        if health["failed_deletes"]:
+            reasons.append("删除失败 %d 条（见 delete_attempts）" % health["failed_deletes"])
+        if health["orphan_pending"]:
+            reasons.append("孤儿 pending 墓碑 %d 条（下次桥启动自动对账）" % health["orphan_pending"])
+    if dc.registry_missing():
+        reasons.append("已裁决保留注册表缺失——白名单豁免已整体停用，C 组重现属预期保护")
     if mixed:
         reasons.append("有 %d 条混合内容需拆分" % len(mixed))
     if manual_classification:
@@ -136,9 +161,14 @@ def main():
         "last_audit": now.isoformat(timespec="seconds"),
         "previous_audit_days_ago": prev_days,
         "stale": prev_days is None or prev_days >= STALE_DAYS,
-        "history_reconstructed_active_count": len(reconstructed),
-        "live_collection_count": None,
-        "live_collection_measurement": "未测量/未知",
+        "authoritative_active_count": len(reconstructed),
+        "live_collection_count": health["live_points"],
+        "live_collection_measurement": (
+            "Qdrant storage.sqlite 直读；活跃 = 实时点 − tombstone" if health["live_points"] is not None
+            else "直读失败，history 兜底重建（墓碑仍已应用）"),
+        "ghost_vectors": len(health["ghosts"]),
+        "last_heal": health["last_heal"],
+        "bridge_code_state": health["bridge_code"],
         "confirmed_keep_candidate_count": len(keep),
         "out_of_scope": len(out_of_scope),
         "mixed_content": len(mixed),
@@ -169,11 +199,18 @@ def main():
     add("")
     add("- 体检时间：%s" % now.strftime("%Y-%m-%d %H:%M"))
     add("- 已测量事实：Inbox 待审核 %d 条；本地规则文件逐项读取。" % len(candidates))
-    add("- history 推导：重建活跃数 **%d**；这不是 MCP/向量索引实时条数。" % len(reconstructed))
-    add("- 实时集合数量：**未测量/未知**。")
+    if not mem0_on:
+        add("- **运行模式：纯文件大脑**（mem0 未接入，`%s` 不存在）——权威层为 `knowledge/` 文件，"
+            "mem0 相关检查（活跃集合/幽灵/桥账本/显式 ID 引用）本项不适用，不计入待决。" % dc.DB)
+    else:
+        add("- 权威活跃集合（实时点−墓碑）：**%d**；实时向量点数：%s（storage.sqlite 直读）。" % (
+            len(reconstructed), health["live_points"] if health["live_points"] is not None else "直读失败"))
+        add("- 幽灵向量（已批准删除仍在盘，桥重启自愈）：%d。" % len(health["ghosts"]))
     add("- 语义同步：**未执行全文语义同步校验**；仅做权威源显式 UUID 引用集合差。")
     add("- 需人工验证：%d 项（本地文件不能证明云端状态）。" % len(manual_due))
     add("- 距上次体检：%s" % ("首次" if prev_days is None else "%d 天" % prev_days))
+    if mem0_on:
+        add("- 已裁决保留注册表：%s。" % ("在位" if not dc.registry_missing() else "**缺失**（豁免层停用）"))
     add("")
 
     number = 0
@@ -224,7 +261,7 @@ def main():
             if candidate.get("sensitive"):
                 advice = "含敏感模式：不进入共享记忆，由用户决定删除或另行处置"
             else:
-                advice = "批准=A 级写入 mem0 并回读；拒绝=记录到拒绝清单；保留=留在 Inbox"
+                advice = "批准=迁入「建议目标目录」并回读；拒绝=记录到拒绝清单；保留=留在 Inbox"
             add("| %d | `%s:%d` | %s | %s | %s |" % (
                 number, candidate["file"], candidate["line"], candidate["date"],
                 candidate["content"], advice,
@@ -293,8 +330,8 @@ def main():
     print("=" * 60)
     print("每周体检 · %s" % now.strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60)
-    print("history 重建活跃数 : %d" % len(reconstructed))
-    print("实时集合数量       : 未测量/未知")
+    print("权威活跃集合       : %d" % len(reconstructed))
+    print("实时向量点数/幽灵  : %s / %d" % (health["live_points"], len(health["ghosts"])))
     print("越界候选           : %d" % len(out_of_scope))
     print("混合内容需拆分     : %d" % len(mixed))
     print("未知/需人工分类    : %d" % len(manual_classification))
